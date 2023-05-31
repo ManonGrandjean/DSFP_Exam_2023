@@ -1,0 +1,58 @@
+---
+title: "Model fitting and evaluation"
+author: "Manon Grandjean"
+date: "2023-05-31"
+output: html_document
+---
+
+```{r load libraries}
+library(tidyverse)
+library(tsibble)
+library(fabletools)
+library(fable)
+
+options(scipen=999)
+```
+
+
+```{r Load and prep data}
+df <- read.csv("Azure2015Data.csv")
+
+# fit date format
+df$datetime <- as.POSIXct(df$datetime, format="%Y-%m-%d %H:%M:%S", tz="UTC")
+
+# remove duplicate rows, create logical var for failure, remove unnecessary cols, arrange for easy splitting
+df <- df %>%
+  distinct(datetime, machineID, .keep_all = TRUE) %>%
+  mutate(failureYN = case_when(failure == '' ~ 0, failure != '' ~ 1)) %>%
+  subset(select = -c(X, Unnamed..0)) %>%
+  arrange(datetime, machineID)
+
+# aggregate to daily
+df$date <- as.Date(df$datetime, "%m/%d/%Y")
+df_daily <- aggregate(cbind(volt,rotate,pressure,vibration)
+                      ~ date + machineID,
+                      df, FUN = "mean", drop = FALSE)
+# it doesn't know what to do with (failureYN, failure, errorID, comp) because they only occur in an hour
+# it doesn know what to do with (model + age) because it tries to do one for each, should be merged onto
+
+# get model and age info for each machine ID
+df_daily <- merge(df_daily, subset(count(df, machineID, age, model), select = -c(n)), by = "machineID")
+
+# add failure and error info for a day and machine if any
+```
+
+
+```{r}
+
+```
+
+
+
+
+
+
+
+
+
+
