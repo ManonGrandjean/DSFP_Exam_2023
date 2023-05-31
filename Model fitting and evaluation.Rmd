@@ -18,16 +18,78 @@ options(scipen=999)
 ```{r Load and prep data}
 df <- read.csv("Azure2015Data.csv")
 
-# fit date format
+# fix date format
 df$datetime <- as.POSIXct(df$datetime, format="%Y-%m-%d %H:%M:%S", tz="UTC")
 
-# remove duplicate rows, create logical var for failure, remove unnecessary cols, arrange for easy splitting
+# remove duplicate rows, create logical var for failure, remove unnecessary cols, arrange temporally for easy splitting
 df <- df %>%
   distinct(datetime, machineID, .keep_all = TRUE) %>%
-  mutate(failureYN = case_when(failure == '' ~ 0, failure != '' ~ 1)) %>%
+  mutate(failureYN = case_when(failure == '' ~ 0, failure != '' ~ 1)) %>% # also errorYN?
   subset(select = -c(X, Unnamed..0)) %>%
   arrange(datetime, machineID)
+```
 
+
+```{r create error, failure, and component variables}
+# vars in df:
+# logical: (error1+2+3+4+5, failure_comp1+2+3+4, replace_comp1+2+3+4) = 13 vars
+# time since: ---||--- = 13 vars
+
+
+# https://stackoverflow.com/questions/71284863/time-since-last-event-of-grouped-data-in-r
+df <- df %>%
+  group_by(machineID) %>%
+  # days since any error and any failure
+  mutate(last_error = if_else(errorID != "", datetime, NA)) %>%
+  mutate(last_failure = if_else(failure != "", datetime, NA)) %>%
+  fill(last_error) %>%
+  fill(last_failure) %>%
+  mutate(daysSinceError = as.numeric(floor(difftime(datetime, last_error, tz="UTC", units="days")))) %>%
+  mutate(daysSinceFailure = as.numeric(floor(difftime(datetime, last_failure, tz="UTC", units="days")))) %>%
+  # logical vars for each type error/failure/comp (not necessary)
+  # daysSince vars for each type of error/failure/comp
+  mutate(
+    lastError1 = if_else(errorID == "error1", datetime, NA),
+    lastError2 = if_else(errorID == "error2", datetime, NA),
+    lastError3 = if_else(errorID == "error3", datetime, NA),
+    lastError4 = if_else(errorID == "error4", datetime, NA),
+    lastError5 = if_else(errorID == "error5", datetime, NA),
+    lastFailureComp1 = if_else(failure == "comp1", datetime, NA),
+    lastFailureComp2 = if_else(failure == "comp2", datetime, NA),
+    lastFailureComp3 = if_else(failure == "comp3", datetime, NA),
+    lastFailureComp4 = if_else(failure == "comp4", datetime, NA),
+    lastComp1Replacement = if_else(comp == "comp1", datetime, NA),
+    lastComp2Replacement = if_else(comp == "comp2", datetime, NA),
+    lastComp3Replacement = if_else(comp == "comp3", datetime, NA),
+    lastComp4Replacement = if_else(comp == "comp4", datetime, NA)
+  ) %>%
+  fill(lastError1,lastError2,lastError3,lastError4,lastError5,lastFailureComp1,lastFailureComp2,lastFailureComp3,
+       lastFailureComp4,lastComp1Replacement,lastComp2Replacement,lastComp3Replacement,lastComp4Replacement) %>%
+  mutate(
+    daysSinceError1 = as.numeric(floor(difftime(datetime, lastError1, tz="UTC", units="days"))),
+    daysSinceError2 = as.numeric(floor(difftime(datetime, lastError2, tz="UTC", units="days"))),
+    daysSinceError3 = as.numeric(floor(difftime(datetime, lastError3, tz="UTC", units="days"))),
+    daysSinceError4 = as.numeric(floor(difftime(datetime, lastError4, tz="UTC", units="days"))),
+    daysSinceError5 = as.numeric(floor(difftime(datetime, lastError5, tz="UTC", units="days"))),
+    daysSinceFailure1 = as.numeric(floor(difftime(datetime, lastFailureComp1, tz="UTC", units="days"))),
+    daysSinceFailure2 = as.numeric(floor(difftime(datetime, lastFailureComp2, tz="UTC", units="days"))),
+    daysSinceFailure3 = as.numeric(floor(difftime(datetime, lastFailureComp3, tz="UTC", units="days"))),
+    daysSinceFailure4 = as.numeric(floor(difftime(datetime, lastFailureComp4, tz="UTC", units="days"))),
+    daysSinceReplace1 = as.numeric(floor(difftime(datetime, lastComp1Replacement, tz="UTC", units="days"))),
+    daysSinceReplace2 = as.numeric(floor(difftime(datetime, lastComp2Replacement, tz="UTC", units="days"))),
+    daysSinceReplace3 = as.numeric(floor(difftime(datetime, lastComp3Replacement, tz="UTC", units="days"))),
+    daysSinceReplace4 = as.numeric(floor(difftime(datetime, lastComp4Replacement, tz="UTC", units="days")))
+  ) %>%
+  # remove unnecessary columns
+  subset(select = -c(last_error,last_failure,lastError1,lastError2,lastError3,lastError4,lastError5,
+                     lastFailureComp1,lastFailureComp2,lastFailureComp3,lastFailureComp4,
+                     lastComp1Replacement,lastComp2Replacement,lastComp3Replacement,lastComp4Replacement))
+
+# do I maybe need to replace NAs in daysSince vars with 0?
+```
+
+
+```{r Aggregate to daily}
 # aggregate to daily
 df$date <- as.Date(df$datetime, "%m/%d/%Y")
 df_daily <- aggregate(cbind(volt,rotate,pressure,vibration)
@@ -40,15 +102,210 @@ df_daily <- aggregate(cbind(volt,rotate,pressure,vibration)
 df_daily <- merge(df_daily, subset(count(df, machineID, age, model), select = -c(n)), by = "machineID")
 
 # add failure and error info for a day and machine if any
+#df_daily <- merge(df_daily, subset(df, errorID != "", select = c(errorID,machineID,date)), by = c("machineID","date"), all = T)
+# merge df[,12:27] onto df_daily by date and machineID
+df_daily <- merge(df_daily, 
+                  distinct(df[,c(1,28,12:27)], machineID, date, .keep_all = TRUE),
+                  by = c("machineID", "date"))
+
+# arrange
+df_daily <- arrange(df_daily, date, machineID)
+
+# make machineID factor (because it is) so logreg will be accurate
+df_daily$machineID <- as.factor(df_daily$machineID)
+```
+
+
+```{r Make lag predictors}
+df_daily <- df_daily %>%
+  group_by(machineID) %>%
+  mutate(lag_1d_volt = lag(volt, n = 1),
+         lag_2d_volt = lag(volt, n = 2),
+         lag_3d_volt = lag(volt, n = 3),
+         lag_4d_volt = lag(volt, n = 4),
+         lag_5d_volt = lag(volt, n = 5),
+         lag_6d_volt = lag(volt, n = 6),
+         lag_7d_volt = lag(volt, n = 7),
+         lag_8d_volt = lag(volt, n = 8),
+         lag_9d_volt = lag(volt, n = 9),
+         lag_10d_volt = lag(volt, n = 10),
+         
+         lag_1d_rotate = lag(rotate, n = 1),
+         lag_2d_rotate = lag(rotate, n = 2),
+         lag_3d_rotate = lag(rotate, n = 3),
+         lag_4d_rotate = lag(rotate, n = 4),
+         lag_5d_rotate = lag(rotate, n = 5),
+         lag_6d_rotate = lag(rotate, n = 6),
+         lag_7d_rotate = lag(rotate, n = 7),
+         lag_8d_rotate = lag(rotate, n = 8),
+         lag_9d_rotate = lag(rotate, n = 9),
+         lag_10d_rotate = lag(rotate, n = 10),
+         
+         lag_1d_rotate = lag(rotate, n = 1),
+         lag_2d_rotate = lag(rotate, n = 2),
+         lag_3d_rotate = lag(rotate, n = 3),
+         lag_4d_rotate = lag(rotate, n = 4),
+         lag_5d_rotate = lag(rotate, n = 5),
+         lag_6d_rotate = lag(rotate, n = 6),
+         lag_7d_rotate = lag(rotate, n = 7),
+         lag_8d_rotate = lag(rotate, n = 8),
+         lag_9d_rotate = lag(rotate, n = 9),
+         lag_10d_rotate = lag(rotate, n = 10),
+         
+         lag_1d_vibration = lag(vibration, n = 1),
+         lag_2d_vibration = lag(vibration, n = 2),
+         lag_3d_vibration = lag(vibration, n = 3),
+         lag_4d_vibration = lag(vibration, n = 4),
+         lag_5d_vibration = lag(vibration, n = 5),
+         lag_6d_vibration = lag(vibration, n = 6),
+         lag_7d_vibration = lag(vibration, n = 7),
+         lag_8d_vibration = lag(vibration, n = 8),
+         lag_9d_vibration = lag(vibration, n = 9),
+         lag_10d_vibration = lag(vibration, n = 10),
+  )
+```
+
+
+
+```{r Train + make forecasts}
+# split into train and test
+# train on 9 months = 75% of data = up to and including index 27300
+train <- df_daily[1:27300,]
+test <- df_daily[27301:36500,]
+```
+
+
+# Failure prediction
+predictors:
+- machineID (as factor)
+- date ?
+- volt + rotate + pressure + vibration
+- age + model
+- daysSinceFailure + daysSinceError
+- daysSinceError_x + daysSinceFailure_x + daysSinceReplace_x
+
+
+
+oooh daysSinceFailure is always going to be 0 when failureYN is 1
+
+
+
+Logistic regression models:
+*model0* = date + machineID (base for all others?)
+*model1* = IoT measures (volt + rotate + pressure + vibration)
+*model2* = IoT measures + machine characteristics (age + model)
+*model3* = IoT measures + daysSinceFailure                                                daysSinceFailure = Faulty?
+*model4* = IoT measures + daysSinceFailure + machine characteristics                      daysSinceFailure = Faulty?
+*model5* = IoT measures + daysSinceFailure + daysSinceError                               daysSinceFailure = Faulty?
+*model6* = IoT measures + daysSinceFailure + daysSinceError + machine characteristics     daysSinceFailure = Faulty?
+*model7* = IoT measures + daysSinceError
+*model8* = IoT measures + daysSinceError + machine characteristics
+
+*model9* = IoT measures and lag predictors
+*model10* = IoT measures, machine characteristics, and lag predictors
+*model11* = IoT measures and lag predictors + daysSinceError
+*model12* = IoT measures, machine characteristics, and lag predictors + daysSinceError    (+daysSinceFailure (if LAST failure))
+
+(if date + machineID are base for all the others, they will be model1b model2b etc.)
+
+
+*lag predictors:*
+lag_1d_volt,lag_2d_volt,lag_3d_volt,lag_4d_volt,lag_5d_volt,lag_6d_volt,lag_7d_volt,lag_8d_volt,lag_9d_volt,
+lag_10d_volt,lag_1d_rotate,lag_2d_rotate,lag_3d_rotate,lag_4d_rotate,lag_5d_rotate,lag_6d_rotate,lag_7d_rotate,
+lag_8d_rotate,lag_9d_rotate,lag_10d_rotate,lag_1d_vibration,lag_2d_vibration,lag_3d_vibration,lag_4d_vibration,
+lag_5d_vibration,lag_6d_vibration,lag_7d_vibration,lag_8d_vibration,lag_9d_vibration,lag_10d_vibration
+
+```{r Fitting logistic regression models}
+model0 <- glm(failureYN ~ date + machineID, 
+              family=binomial(link='logit'), 
+              data = train)
+
+model1 <- glm(failureYN ~ volt + rotate + pressure + vibration, 
+              family=binomial(link='logit'), 
+              data = train)
+
+model2 <- glm(failureYN ~ volt + rotate + pressure + vibration + age + model, 
+              family=binomial(link='logit'), 
+              data = train)
+
+# daysSinceFailure (which is probably a bad predictor) (unless it was days since LAST failure)
+#model3 <- glm(failureYN ~ volt + rotate + pressure + vibration + daysSinceFailure, 
+#              family=binomial(link='logit'), 
+#              data = train)
+#model4 <- glm(failureYN ~ volt + rotate + pressure + vibration + daysSinceFailure + age + model, 
+#              family=binomial(link='logit'), 
+#              data = train)
+#model5 <- glm(failureYN ~ volt + rotate + pressure + vibration + daysSinceFailure + daysSinceError, 
+#              family=binomial(link='logit'), 
+#              data = train)
+#model6 <- glm(failureYN ~ volt + rotate + pressure + vibration + daysSinceFailure + daysSinceError + age + model, 
+#              family=binomial(link='logit'), 
+#              data = train)
+
+model7 <- glm(failureYN ~ volt + rotate + pressure + vibration + daysSinceError, 
+              family=binomial(link='logit'), 
+              data = train)
+
+model8 <- glm(failureYN ~ volt + rotate + pressure + vibration + daysSinceError + age + model, 
+              family=binomial(link='logit'), 
+              data = train)
+
+
+# with lag predictors:
+model9 <- glm(failureYN ~ volt + rotate + pressure + vibration + 
+                lag_1d_volt + lag_2d_volt + lag_3d_volt + lag_4d_volt + lag_5d_volt + lag_6d_volt + lag_7d_volt + lag_8d_volt +
+                lag_9d_volt + lag_10d_volt + lag_1d_rotate + lag_2d_rotate + lag_3d_rotate + lag_4d_rotate + lag_5d_rotate +
+                lag_6d_rotate + lag_7d_rotate + lag_8d_rotate + lag_9d_rotate + lag_10d_rotate + lag_1d_vibration +
+                lag_2d_vibration + lag_3d_vibration + lag_4d_vibration + lag_5d_vibration + lag_6d_vibration + 
+                lag_7d_vibration + lag_8d_vibration + lag_9d_vibration + lag_10d_vibration, 
+              family=binomial(link='logit'), 
+              data = train)
+
+model10 <- glm(failureYN ~ volt + rotate + pressure + vibration + age + model +
+                lag_1d_volt + lag_2d_volt + lag_3d_volt + lag_4d_volt + lag_5d_volt + lag_6d_volt + lag_7d_volt + lag_8d_volt +
+                lag_9d_volt + lag_10d_volt + lag_1d_rotate + lag_2d_rotate + lag_3d_rotate + lag_4d_rotate + lag_5d_rotate +
+                lag_6d_rotate + lag_7d_rotate + lag_8d_rotate + lag_9d_rotate + lag_10d_rotate + lag_1d_vibration +
+                lag_2d_vibration + lag_3d_vibration + lag_4d_vibration + lag_5d_vibration + lag_6d_vibration + 
+                lag_7d_vibration + lag_8d_vibration + lag_9d_vibration + lag_10d_vibration, 
+              family=binomial(link='logit'), 
+              data = train)
+
+model11 <- glm(failureYN ~ volt + rotate + pressure + vibration + daysSinceError + 
+                lag_1d_volt + lag_2d_volt + lag_3d_volt + lag_4d_volt + lag_5d_volt + lag_6d_volt + lag_7d_volt + lag_8d_volt +
+                lag_9d_volt + lag_10d_volt + lag_1d_rotate + lag_2d_rotate + lag_3d_rotate + lag_4d_rotate + lag_5d_rotate +
+                lag_6d_rotate + lag_7d_rotate + lag_8d_rotate + lag_9d_rotate + lag_10d_rotate + lag_1d_vibration +
+                lag_2d_vibration + lag_3d_vibration + lag_4d_vibration + lag_5d_vibration + lag_6d_vibration + 
+                lag_7d_vibration + lag_8d_vibration + lag_9d_vibration + lag_10d_vibration, 
+              family=binomial(link='logit'), 
+              data = train)
+
+model12 <- glm(failureYN ~ volt + rotate + pressure + vibration + age + model + daysSinceError + 
+                lag_1d_volt + lag_2d_volt + lag_3d_volt + lag_4d_volt + lag_5d_volt + lag_6d_volt + lag_7d_volt + lag_8d_volt +
+                lag_9d_volt + lag_10d_volt + lag_1d_rotate + lag_2d_rotate + lag_3d_rotate + lag_4d_rotate + lag_5d_rotate +
+                lag_6d_rotate + lag_7d_rotate + lag_8d_rotate + lag_9d_rotate + lag_10d_rotate + lag_1d_vibration +
+                lag_2d_vibration + lag_3d_vibration + lag_4d_vibration + lag_5d_vibration + lag_6d_vibration + 
+                lag_7d_vibration + lag_8d_vibration + lag_9d_vibration + lag_10d_vibration, 
+              family=binomial(link='logit'), 
+              data = train)
+
+# Warning: glm.fit: algorithm did not converge
+# https://www.statology.org/glm-fit-algorithm-did-not-converge/
 ```
 
 
 ```{r}
+summary(model12)
 
+summary(model0)['aic']
+summary(model1)['aic']
+summary(model2)['aic']
+summary(model3)['aic']
+summary(model4)['aic']
+summary(model5)['aic']
+summary(model6)['aic']
+summary(model7)['aic']
+summary(model8)['aic']
 ```
-
-
-
 
 
 
