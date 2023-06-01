@@ -11,6 +11,7 @@ library(tsibble)
 library(fabletools)
 library(fable)
 library(feasts)
+library(gridExtra)
 
 options(scipen=999)
 ```
@@ -518,8 +519,9 @@ ConfMat0 <- confusionMatrix(reference = as.factor(test$failureYN), as.factor(tes
 ConfMat12
 ```
 
-# Forecasts
 
+
+# Forecasts
 
 ```{r prepare data for forecasting}
 # train and test tsibbles
@@ -552,41 +554,183 @@ machine_forecast <- function(fc, actual, id){
 }
 ```
 
+# Variables to forecast
+*needs forecasting:* volt + rotate + pressure + vibration + daysSinceError
+*do not need forecasting:* age + model + machineID + date + all lag predictors (can be calculated after IoT forecasts)
+
 
 ```{r Fit forecast models}
-# predictors:
-# season() gives us days of the week
+# fit all (TSLM + Seasonal Naïve model) to compare
+fit_volt <- model(tsrain, LM=TSLM(volt ~ trend() + season()),SN=SNAIVE(volt))
+fit_rotate <- model(tsrain, LM=TSLM(rotate ~ trend() + season()),SN=SNAIVE(rotate))
+fit_pressure <- model(tsrain, LM=TSLM(pressure ~ trend() + season()),SN=SNAIVE(pressure))
+fit_vibration <- model(tsrain, LM=TSLM(vibration ~ trend() + season()),SN=SNAIVE(vibration))
+fit_daysSinceError <- model(tsrain, LM=TSLM(daysSinceError ~ trend() + season()),SN=SNAIVE(daysSinceError))
 
-
-fit_volt <- model(tsrain, TSLM(volt ~ trend() + season()))
+# produce forecasts
 fc_volt <- forecast(fit_volt, new_data = future_Q4[,1:2])
-machine_report(fit_volt, 1)
-machine_forecast(fc_volt, tsest, 1)+ggtitle("TSLM(volt ~ trend() + season())                Machine1")
+fc_rotate <- forecast(fit_rotate, new_data = future_Q4[,1:2])
+fc_pressure <- forecast(fit_pressure, new_data = future_Q4[,1:2])
+fc_vibration <- forecast(fit_vibration, new_data = future_Q4[,1:2])
+fc_daysSinceError <- forecast(fit_daysSinceError, new_data = future_Q4[,1:2])
+```
+
+
+```{r Test forecast accuracy of the different models}
+# Point forecast accuracy: How much error?
+# The average of each score across machines
+accuracy(fit_volt) %>% select(.model, machineID, MAE, MASE, RMSE, MAPE) %>%
+  aggregate(cbind(MAE, MASE, RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
+
+accuracy(fit_rotate) %>% select(.model, machineID, MAE, MASE, RMSE, MAPE) %>%
+  aggregate(cbind(MAE, MASE, RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
+
+accuracy(fit_pressure) %>% select(.model, machineID, MAE, MASE, RMSE, MAPE) %>%
+  aggregate(cbind(MAE, MASE, RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
+
+accuracy(fit_vibration) %>% select(.model, machineID, MAE, MASE, RMSE, MAPE) %>%
+  aggregate(cbind(MAE, MASE, RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
+
+accuracy(fit_daysSinceError) %>% select(.model, machineID, MAE, MASE, RMSE, MAPE) %>%
+  aggregate(cbind(MAE, MASE, RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
+
+
+# Distributional forecast accuracy: Continuous ranked probability score (CRPS)
+fc_volt %>% accuracy(rbind(tsrain, tsest), measures = list(crps=CRPS, skill=skill_score(CRPS))) %>%
+  aggregate(cbind(crps, skill) ~ .model, FUN = "mean", drop = FALSE)
+
+fc_rotate %>% accuracy(rbind(tsrain, tsest), measures = list(crps=CRPS, skill=skill_score(CRPS))) %>%
+  aggregate(cbind(crps, skill) ~ .model, FUN = "mean", drop = FALSE)
+
+fc_pressure %>% accuracy(rbind(tsrain, tsest), measures = list(crps=CRPS, skill=skill_score(CRPS))) %>%
+  aggregate(cbind(crps, skill) ~ .model, FUN = "mean", drop = FALSE)
+
+fc_vibration %>% accuracy(rbind(tsrain, tsest), measures = list(crps=CRPS, skill=skill_score(CRPS))) %>%
+  aggregate(cbind(crps, skill) ~ .model, FUN = "mean", drop = FALSE)
+
+fc_daysSinceError %>% accuracy(rbind(tsrain, tsest), measures = list(crps=CRPS, skill=skill_score(CRPS))) %>%
+  aggregate(cbind(crps, skill) ~ .model, FUN = "mean", drop = FALSE)
+
+# Visualized:
 
 ```
+
+
+
+```{r Fit winning forecast models with bootsraps}
+# fit all (basic TSLM model) ([also fit something else to compare and pick TSLM?])
+fit_volt <- model(tsrain, TSLM(volt ~ trend() + season()))
+fit_rotate <- model(tsrain, TSLM(rotate ~ trend() + season()))
+fit_pressure <- model(tsrain, TSLM(pressure ~ trend() + season()))
+fit_vibration <- model(tsrain, TSLM(vibration ~ trend() + season()))
+fit_daysSinceError <- model(tsrain, TSLM(daysSinceError ~ trend() + season()))
+
+# forecast (with/without bootstrapping) (only TSLM)
+fc_volt <- forecast(fit_volt, new_data = future_Q4[,1:2])
+fc_volt_bs5 <- forecast(fit_volt, new_data = future_Q4[,1:2], bootstrap=T,times=5)
+fc_volt_bs100 <- forecast(fit_volt, new_data = future_Q4[,1:2], bootstrap=T,times=100)
+
+fc_rotate <- forecast(fit_rotate, new_data = future_Q4[,1:2])
+fc_rotate_bs5 <- forecast(fit_rotate, new_data = future_Q4[,1:2], bootstrap=T,times=5)
+fc_rotate_bs100 <- forecast(fit_rotate, new_data = future_Q4[,1:2], bootstrap=T,times=100)
+
+fc_pressure <- forecast(fit_pressure, new_data = future_Q4[,1:2])
+fc_pressure_bs5 <- forecast(fit_pressure, new_data = future_Q4[,1:2], bootstrap=T,times=5)
+fc_pressure_bs100 <- forecast(fit_pressure, new_data = future_Q4[,1:2], bootstrap=T,times=100)
+
+fc_vibration <- forecast(fit_vibration, new_data = future_Q4[,1:2])
+fc_vibration_bs5 <- forecast(fit_vibration, new_data = future_Q4[,1:2], bootstrap=T,times=5)
+fc_vibration_bs100 <- forecast(fit_vibration, new_data = future_Q4[,1:2], bootstrap=T,times=100)
+
+fc_daysSinceError <- forecast(fit_daysSinceError, new_data = future_Q4[,1:2])
+fc_daysSinceError_bs5 <- forecast(fit_daysSinceError, new_data = future_Q4[,1:2], bootstrap=T,times=5)
+fc_daysSinceError_bs100 <- forecast(fit_daysSinceError, new_data = future_Q4[,1:2], bootstrap=T,times=100)
+```
+
+
+
+
 
 
 ```{r Inspect residuals}
 # FPP3 5.4
 
-# raw residuals
-augment(fit_volt[fit_volt$machineID == 1,]) %>%
-  autoplot(.resid)+theme_light()
+# autocorrelation ?
 
-# histogram of residuals
-augment(fit_volt[fit_volt$machineID == 1,]) %>%
-  ggplot(aes(x = .resid))+
-  geom_histogram(bins = 100)+
-  theme_light()+
-  labs(title = "Histogram of residuals")
 
-#augment(fit_volt[fit_volt$machineID == 1,]) %>%
-#  nlme::ACF(.resid) %>%
-#  autoplot()+
-#  theme_light()+
-#  labs(title = "ACF of residuals")
+# Normality of residuals
+gg_tsresiduals(fit_volt[fit_volt$machineID == 1,])
+gg_tsresiduals(fit_rotate[fit_rotate$machineID == 1,])
+gg_tsresiduals(fit_pressure[fit_pressure$machineID == 1,])
+gg_tsresiduals(fit_vibration[fit_vibration$machineID == 1,])
+gg_tsresiduals(fit_daysSinceError[fit_daysSinceError$machineID == 1,])
 
 gg_tsresiduals(fit_volt[fit_volt$machineID == 1,])
+gg_tsresiduals(fit_rotate[fit_rotate$machineID == 1,])
+gg_tsresiduals(fit_pressure[fit_pressure$machineID == 1,])
+gg_tsresiduals(fit_vibration[fit_vibration$machineID == 1,])
+gg_tsresiduals(fit_daysSinceError[fit_daysSinceError$machineID == 1,])
+# the residuals are not homoschedastic :(
+
+# portmanteau tests - do the residuals come from white noise?
+augment(fit_volt)%>%
+  features(.innov, ljung_box, lag = 7)
+# lb_pvalues are very small (on most machines), so it seems very, very unlikely that this is just white noise
+```
+
+
+```{r Forecast evaluation}
+# scatterplot of forecast vs. real
+plot(tsest$volt,fc_volt[fc_volt$.model=="tslm",]$.mean)
+
+# FPP3 5.8 - Point forecast accuracy
+# mean absolute error, mean squared error (in square scale), root mean squared error RMSE (back to normal scale), 
+# mean absolute percentage error (scale-independant: takes away scale and becomes %)
+accuracy(fit_volt) %>%
+  select(machineID, MAE, MASE, RMSE, MAPE)
+# are they going to have the same here because they are the same fit?
+
+# FPP3 5.9 - distributional forecast accuracy
+fc_volt %>%
+  accuracy(rbind(tsrain, tsest), measures = list(qs=quantile_score), probs = 0.1) # estimating the 0.1 quantile
+# interpretation: 
+
+fc_volt %>%
+  accuracy(rbind(tsrain, tsest), measures = list(winkler=winkler_score), levels = 80) # estimating the 80% confidence int
+# winkler score = "width of the interval + penalty if you miss the actual observation"
+# interpretation: lower ws is better
+
+# Continuous ranked probability score (CRPS value)
+fc_volt %>%
+  accuracy(rbind(tsrain, tsest), measures = list(crps=CRPS))
+# interpretation: lower is better. crps in in the unit of the data (e.g. volt)
+# if we want something comparable and scale-independent, we use a skill scores
+fc_volt %>%
+  accuracy(rbind(tsrain, tsest), measures = list(skill=skill_score(CRPS)))
+#Interpretation: High is good!
+# if skill is negative, it is worse than the baseline (but what is the baseline?) "benchmark method (often naive)"
+# It's percentage so -0.27 means 27% worse. 2.0 means twice as good
+```
+
+
+```{r fill in the rest of the predictors for the LogReg (Q4 + Q1)}
+# make lag predictors (some rows based on real data, rest on forecasts)
+```
+
+
+```{r Failure prediction on forecasts (2015 Q4)}
+
+```
+
+
+```{r Evaluation of failure prediction Q4}
+
+```
+
+
+```{r Forecasts and failure prediction (2016 Q1)}
+# cannot be evaluated as the data doesn't exist
+# Just to illustrate how dashboard would look
 ```
 
 
@@ -644,22 +788,47 @@ machine_forecast(fc_volt_test, tsest, 1)
 
 machine_report(fit_volt_test[,c(1,3)], 1)
 
+
+
+# FPP3 5.5?
+sim <- fit_volt |> generate(new_data = tsest, times = 5, bootstrap = TRUE)
+
+tsrain[tsrain$date > "2015-09-01" & tsrain$machineID=="1",] |>
+  ggplot(aes(x = date)) +
+  geom_line(aes(y = volt)) +
+  geom_line(aes(y = .sim, colour = as.factor(.rep)),
+    data = sim[sim$machineID=="1" & sim$date < "2015-11-01",]) +
+  #labs(title="Google daily closing stock price", y="$US" ) +
+  guides(colour = "none")
+
+tsrain[tsrain$machineID=="1",] |>
+  ggplot(aes(x = date)) +
+  geom_line(aes(y = volt)) +
+  geom_line(aes(y = .sim, colour = as.factor(.rep)),
+    data = sim[sim$machineID=="1",]) +
+  #labs(title="Google daily closing stock price", y="$US" ) +
+  guides(colour = "none")
+
+
+
+
+# OLD forecast fitting code: ----
+fit_volt <- model(tsrain, TSLM(volt ~ trend() + season()))
+fc_volt <- forecast(fit_volt, new_data = future_Q4[,1:2])
+machine_report(fit_volt, 1)
+machine_forecast(fc_volt, tsest, 1)+ggtitle("TSLM(volt ~ trend() + season())                Machine1")
+
+
+fit_volt <- model(tsrain, TSLM(volt ~ trend() + season()))
+fc_volt <- forecast(fit_volt, new_data = future_Q4[,1:2], bootstrap =T, times=3)
+machine_report(fit_volt, 1)
+machine_forecast(fc_volt, tsest, 3)+ggtitle("TSLM(volt ~ trend() + season())  +bootstrap*3              Machine1")
+
+fit_volt_STL <- model(tsrain, STL(volt))
+components(fit_volt_STL)
 ```
 
 
 
 
-
-```{r Evaluation of forecasts and fit}
-
-# scatterplot of forecast vs. real
-plot(tsest$volt,fc_volt[fc_volt$.model=="tslm",]$.mean)
-```
-
-
-
-
-```{r Failure prediction on forecasts (2015 Q4)}
-
-```
 
