@@ -12,6 +12,7 @@ library(fabletools)
 library(fable)
 library(feasts)
 library(gridExtra)
+library(caret)
 
 options(scipen=999)
 ```
@@ -166,7 +167,7 @@ df_daily <- df_daily %>%
          lag_7d_vibration = lag(vibration, n = 7),
          lag_8d_vibration = lag(vibration, n = 8),
          lag_9d_vibration = lag(vibration, n = 9),
-         lag_10d_vibration = lag(vibration, n = 10),
+         lag_10d_vibration = lag(vibration, n = 10)
   )
 ```
 
@@ -549,23 +550,24 @@ machine_forecast <- function(fc, actual, id){
   actual2 <- actual[actual$machineID == id,]
   
   fc2 |>
-    autoplot(actual2)+
+    autoplot(actual2, alpha = 0.5)+
     theme_light()
 }
 ```
 
-# Variables to forecast
+
+Variables to forecast:
 *needs forecasting:* volt + rotate + pressure + vibration + daysSinceError
 *do not need forecasting:* age + model + machineID + date + all lag predictors (can be calculated after IoT forecasts)
 
 
 ```{r Fit forecast models}
 # fit all (TSLM + Seasonal Naïve model) to compare
-fit_volt <- model(tsrain, LM=TSLM(volt ~ trend() + season()),SN=SNAIVE(volt))
-fit_rotate <- model(tsrain, LM=TSLM(rotate ~ trend() + season()),SN=SNAIVE(rotate))
-fit_pressure <- model(tsrain, LM=TSLM(pressure ~ trend() + season()),SN=SNAIVE(pressure))
-fit_vibration <- model(tsrain, LM=TSLM(vibration ~ trend() + season()),SN=SNAIVE(vibration))
-fit_daysSinceError <- model(tsrain, LM=TSLM(daysSinceError ~ trend() + season()),SN=SNAIVE(daysSinceError))
+fit_volt <- model(tsrain, SN=SNAIVE(volt), LM=TSLM(volt ~ trend() + season()))
+fit_rotate <- model(tsrain, SN=SNAIVE(rotate), LM=TSLM(rotate ~ trend() + season()))
+fit_pressure <- model(tsrain, SN=SNAIVE(pressure), LM=TSLM(pressure ~ trend() + season()))
+fit_vibration <- model(tsrain, SN=SNAIVE(vibration), LM=TSLM(vibration ~ trend() + season()))
+fit_daysSinceError <- model(tsrain, SN=SNAIVE(daysSinceError), LM=TSLM(daysSinceError ~ trend() + season()))
 
 # produce forecasts
 fc_volt <- forecast(fit_volt, new_data = future_Q4[,1:2])
@@ -579,20 +581,20 @@ fc_daysSinceError <- forecast(fit_daysSinceError, new_data = future_Q4[,1:2])
 ```{r Test forecast accuracy of the different models}
 # Point forecast accuracy: How much error?
 # The average of each score across machines
-accuracy(fit_volt) %>% select(.model, machineID, MAE, MASE, RMSE, MAPE) %>%
-  aggregate(cbind(MAE, MASE, RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
+accuracy(fit_volt) %>% select(.model, machineID, RMSE, MAPE) %>%
+  aggregate(cbind(RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
 
-accuracy(fit_rotate) %>% select(.model, machineID, MAE, MASE, RMSE, MAPE) %>%
-  aggregate(cbind(MAE, MASE, RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
+accuracy(fit_rotate) %>% select(.model, machineID, RMSE, MAPE) %>%
+  aggregate(cbind(RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
 
-accuracy(fit_pressure) %>% select(.model, machineID, MAE, MASE, RMSE, MAPE) %>%
-  aggregate(cbind(MAE, MASE, RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
+accuracy(fit_pressure) %>% select(.model, machineID, RMSE, MAPE) %>%
+  aggregate(cbind(RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
 
-accuracy(fit_vibration) %>% select(.model, machineID, MAE, MASE, RMSE, MAPE) %>%
-  aggregate(cbind(MAE, MASE, RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
+accuracy(fit_vibration) %>% select(.model, machineID, RMSE, MAPE) %>%
+  aggregate(cbind(RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
 
-accuracy(fit_daysSinceError) %>% select(.model, machineID, MAE, MASE, RMSE, MAPE) %>%
-  aggregate(cbind(MAE, MASE, RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
+accuracy(fit_daysSinceError) %>% select(.model, machineID, RMSE, MAPE) %>%
+  aggregate(cbind(RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
 
 
 # Distributional forecast accuracy: Continuous ranked probability score (CRPS)
@@ -611,8 +613,19 @@ fc_vibration %>% accuracy(rbind(tsrain, tsest), measures = list(crps=CRPS, skill
 fc_daysSinceError %>% accuracy(rbind(tsrain, tsest), measures = list(crps=CRPS, skill=skill_score(CRPS))) %>%
   aggregate(cbind(crps, skill) ~ .model, FUN = "mean", drop = FALSE)
 
-# Visualized:
+# Visualized: (Q3 + Q4)
+Q3Q4 <- rbind(tsrain[tsrain$date > "2015-05-31",],tsest)
+machine_forecast(fc_volt, Q3Q4, 1)
+machine_forecast(fc_rotate, Q3Q4, 1)
+machine_forecast(fc_pressure, Q3Q4, 1)
+machine_forecast(fc_vibration, Q3Q4, 1)
+machine_forecast(fc_daysSinceError, Q3Q4, 1)
 
+machine_forecast(fc_volt, tsest, 1)
+machine_forecast(fc_rotate, tsest, 1)
+machine_forecast(fc_pressure, tsest, 1)
+machine_forecast(fc_vibration, tsest, 1)
+machine_forecast(fc_daysSinceError, tsest, 1)
 ```
 
 
@@ -649,13 +662,100 @@ fc_daysSinceError_bs100 <- forecast(fit_daysSinceError, new_data = future_Q4[,1:
 
 
 
+```{r Evaluating bootstrap models}
+complete_data <- rbind(tsrain, tsest)
+
+# Distributional forecast accuracy: Continuous ranked probability score (CRPS)
+fc_daysSinceError %>%
+  accuracy(complete_data, measures = list(crps=CRPS, skill=skill_score(CRPS))) %>%
+  aggregate(cbind(crps, skill) ~ .model, FUN = "mean", drop = FALSE)
+
+# getting accuracy from bootstrapped models should work!
+# https://www.r-bloggers.com/2019/10/non-gaussian-forecasting-using-fable/
+
+acc_volt_bs5 <- fc_volt_bs5 %>%
+  accuracy(complete_data, measures = list(crps=CRPS, skill=skill_score(CRPS))) %>%
+  aggregate(cbind(crps, skill) ~ .model, FUN = "mean", drop = FALSE)
+# took from 18:24 to 18:42 = 18 mins
+
+acc_rotate_bs5 <- fc_rotate_bs5 %>%
+  accuracy(complete_data, measures = list(crps=CRPS, skill=skill_score(CRPS))) %>%
+  aggregate(cbind(crps, skill) ~ .model, FUN = "mean", drop = FALSE)
+# from 19:14 to 19:32 = 18 mins
+
+acc_pressure_bs5 <- fc_pressure_bs5 %>%
+  accuracy(complete_data, measures = list(crps=CRPS, skill=skill_score(CRPS))) %>%
+  aggregate(cbind(crps, skill) ~ .model, FUN = "mean", drop = FALSE)
+# from 19:32 to : = 18 mins
+
+acc_vibration_bs5 <- fc_vibration_bs5 %>%
+  accuracy(complete_data, measures = list(crps=CRPS, skill=skill_score(CRPS))) %>%
+  aggregate(cbind(crps, skill) ~ .model, FUN = "mean", drop = FALSE)
+# from : to : = 18 mins
+
+acc_daysSinceError_bs5 <- fc_daysSinceError_bs5 %>%
+  accuracy(complete_data, measures = list(crps=CRPS, skill=skill_score(CRPS))) %>%
+  aggregate(cbind(crps, skill) ~ .model, FUN = "mean", drop = FALSE)
+# from : to : = 18 mins
+
+
+
+# point accuracy:
+fc_volt %>%
+  accuracy(complete_data) %>% select(.model, machineID, RMSE, MAPE) %>%
+  aggregate(cbind(RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
+
+```
+
+
+
+
+
+```{r the 100 botstraps }
+acc_volt_bs100 <- fc_volt_bs100 %>%
+  accuracy(complete_data, measures = list(rmse=RMSE, mape=MAPE, crps=CRPS, skill=skill_score(CRPS))) %>%
+  aggregate(cbind(rmse, mape, crps, skill) ~ .model, FUN = "mean", drop = FALSE)
+# from : to : = mins
+
+
+acc_rotate_bs100 <- fc_rotate_bs100 %>%
+  accuracy(complete_data, measures = list(rmse=RMSE, mape=MAPE, crps=CRPS, skill=skill_score(CRPS))) %>%
+  aggregate(cbind(rmse, mape, crps, skill) ~ .model, FUN = "mean", drop = FALSE)
+# from 21:20 to 21:39 = 19 mins
+
+
+acc_pressure_bs100 <- fc_pressure_bs100 %>%
+  accuracy(complete_data, measures = list(rmse=RMSE, mape=MAPE, crps=CRPS, skill=skill_score(CRPS))) %>%
+  aggregate(cbind(rmse, mape, crps, skill) ~ .model, FUN = "mean", drop = FALSE)
+ #from 21:39 to 21:58 = 19 mins
+
+
+acc_vibration_bs100 <- fc_vibration_bs100 %>%
+  accuracy(complete_data, measures = list(rmse=RMSE, mape=MAPE, crps=CRPS, skill=skill_score(CRPS))) %>%
+  aggregate(cbind(rmse, mape, crps, skill) ~ .model, FUN = "mean", drop = FALSE)
+# from : to : = 20 mins
+
+
+acc_daysSinceError_bs100 <- fc_daysSinceError_bs100 %>%
+  accuracy(complete_data, measures = list(rmse=RMSE, mape=MAPE, crps=CRPS, skill=skill_score(CRPS))) %>%
+  aggregate(cbind(rmse, mape, crps, skill) ~ .model, FUN = "mean", drop = FALSE)
+# from : to : = 20 mins
+
+
+# point accuracy:
+fc_daysSinceError_bs100 %>%
+  accuracy(complete_data) %>% select(.model, machineID, RMSE, MAPE) %>%
+  aggregate(cbind(RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
+```
+
+
+
 
 
 
 ```{r Inspect residuals}
 # FPP3 5.4
 
-# autocorrelation ?
 
 
 # Normality of residuals
@@ -679,53 +779,159 @@ augment(fit_volt)%>%
 ```
 
 
-```{r Forecast evaluation}
-# scatterplot of forecast vs. real
-plot(tsest$volt,fc_volt[fc_volt$.model=="tslm",]$.mean)
 
-# FPP3 5.8 - Point forecast accuracy
-# mean absolute error, mean squared error (in square scale), root mean squared error RMSE (back to normal scale), 
-# mean absolute percentage error (scale-independant: takes away scale and becomes %)
-accuracy(fit_volt) %>%
-  select(machineID, MAE, MASE, RMSE, MAPE)
-# are they going to have the same here because they are the same fit?
-
-# FPP3 5.9 - distributional forecast accuracy
-fc_volt %>%
-  accuracy(rbind(tsrain, tsest), measures = list(qs=quantile_score), probs = 0.1) # estimating the 0.1 quantile
-# interpretation: 
-
-fc_volt %>%
-  accuracy(rbind(tsrain, tsest), measures = list(winkler=winkler_score), levels = 80) # estimating the 80% confidence int
-# winkler score = "width of the interval + penalty if you miss the actual observation"
-# interpretation: lower ws is better
-
-# Continuous ranked probability score (CRPS value)
-fc_volt %>%
-  accuracy(rbind(tsrain, tsest), measures = list(crps=CRPS))
-# interpretation: lower is better. crps in in the unit of the data (e.g. volt)
-# if we want something comparable and scale-independent, we use a skill scores
-fc_volt %>%
-  accuracy(rbind(tsrain, tsest), measures = list(skill=skill_score(CRPS)))
-#Interpretation: High is good!
-# if skill is negative, it is worse than the baseline (but what is the baseline?) "benchmark method (often naive)"
-# It's percentage so -0.27 means 27% worse. 2.0 means twice as good
-```
+# Forecasts + Failure prediction
 
 
 ```{r fill in the rest of the predictors for the LogReg (Q4 + Q1)}
+# glue together mean forecast values in future_Q4
+future_Q4$volt <- fc_volt$.mean
+future_Q4$rotate <- fc_rotate$.mean
+future_Q4$pressure <- fc_pressure$.mean
+future_Q4$vibration <- fc_vibration$.mean
+future_Q4$daysSinceError <- fc_daysSinceError$.mean
+
+# ALTERNATIVE: using the forecasts from the 100 * bootstrap model
+#future_Q4$volt <- fc_volt_bs100$.mean
+#future_Q4$rotate <- fc_rotate_bs100$.mean
+#future_Q4$pressure <- fc_pressure_bs100$.mean
+#future_Q4$vibration <- fc_vibration_bs100$.mean
+#future_Q4$daysSinceError <- fc_daysSinceError_bs100$.mean
+
 # make lag predictors (some rows based on real data, rest on forecasts)
+future_Q4 <- rbind(tsrain[tsrain$date > "2015-09-20",], future_Q4) %>% # grab last 10 days of training set
+  arrange(machineID, date) %>%
+  group_by(machineID) %>%
+  mutate(lag_1d_volt = lag(volt, n = 1),
+         lag_2d_volt = lag(volt, n = 2),
+         lag_3d_volt = lag(volt, n = 3),
+         lag_4d_volt = lag(volt, n = 4),
+         lag_5d_volt = lag(volt, n = 5),
+         lag_6d_volt = lag(volt, n = 6),
+         lag_7d_volt = lag(volt, n = 7),
+         lag_8d_volt = lag(volt, n = 8),
+         lag_9d_volt = lag(volt, n = 9),
+         lag_10d_volt = lag(volt, n = 10),
+         
+         lag_1d_rotate = lag(rotate, n = 1),
+         lag_2d_rotate = lag(rotate, n = 2),
+         lag_3d_rotate = lag(rotate, n = 3),
+         lag_4d_rotate = lag(rotate, n = 4),
+         lag_5d_rotate = lag(rotate, n = 5),
+         lag_6d_rotate = lag(rotate, n = 6),
+         lag_7d_rotate = lag(rotate, n = 7),
+         lag_8d_rotate = lag(rotate, n = 8),
+         lag_9d_rotate = lag(rotate, n = 9),
+         lag_10d_rotate = lag(rotate, n = 10),
+         
+         lag_1d_pressure = lag(pressure, n = 1),
+         lag_2d_pressure = lag(pressure, n = 2),
+         lag_3d_pressure = lag(pressure, n = 3),
+         lag_4d_pressure = lag(pressure, n = 4),
+         lag_5d_pressure = lag(pressure, n = 5),
+         lag_6d_pressure = lag(pressure, n = 6),
+         lag_7d_pressure = lag(pressure, n = 7),
+         lag_8d_pressure = lag(pressure, n = 8),
+         lag_9d_pressure = lag(pressure, n = 9),
+         lag_10d_pressure = lag(pressure, n = 10),
+         
+         lag_1d_vibration = lag(vibration, n = 1),
+         lag_2d_vibration = lag(vibration, n = 2),
+         lag_3d_vibration = lag(vibration, n = 3),
+         lag_4d_vibration = lag(vibration, n = 4),
+         lag_5d_vibration = lag(vibration, n = 5),
+         lag_6d_vibration = lag(vibration, n = 6),
+         lag_7d_vibration = lag(vibration, n = 7),
+         lag_8d_vibration = lag(vibration, n = 8),
+         lag_9d_vibration = lag(vibration, n = 9),
+         lag_10d_vibration = lag(vibration, n = 10)
+  )
+
+# remove that last 10 days of tsrain again
+future_Q4 <- future_Q4[future_Q4$date > "2015-09-30",]
 ```
 
 
 ```{r Failure prediction on forecasts (2015 Q4)}
+# Save predictions
+future_Q4$PoF_model12 <- predict(model12, newdata = future_Q4, type = 'response')
 
+# Set decision boundary
+decision_boundary <- 0.5
+
+# Create 0-1 predictions from models
+future_Q4 <- future_Q4 %>%
+  mutate(Failure_m12 = ifelse(PoF_model12 < decision_boundary, 0, 1))
+
+# Visualize
+showFCandFP <- function(machine){
+  grid.arrange(
+    ggplot()+geom_line(data = future_Q4[future_Q4$machineID==machine,], aes(x=date,y=volt), color = "#4E84C4")+
+      geom_line(data = tsrain[tsrain$date > "2015-08-01"& tsrain$machineID==machine,], aes(x=date,y=volt))+
+      theme_light()+xlab(""),
+    ggplot()+geom_line(data = future_Q4[future_Q4$machineID==machine,], aes(x=date,y=rotate), color = "#52854C")+
+      geom_line(data = tsrain[tsrain$date > "2015-08-01"& tsrain$machineID==machine,], aes(x=date,y=rotate))+
+      theme_light()+xlab(""),
+    ggplot()+geom_line(data = future_Q4[future_Q4$machineID==machine,], aes(x=date,y=pressure), color = "#FFDB6D")+
+      geom_line(data = tsrain[tsrain$date > "2015-08-01"& tsrain$machineID==machine,], aes(x=date,y=pressure))+
+      theme_light()+xlab(""),
+    ggplot()+geom_line(data = future_Q4[future_Q4$machineID==machine,], aes(x=date,y=vibration), color = "#00aa89")+
+      geom_line(data = tsrain[tsrain$date > "2015-08-01"& tsrain$machineID==machine,], aes(x=date,y=vibration))+
+      theme_light()+xlab(""),
+    ggplot()+geom_line(data = future_Q4[future_Q4$machineID==machine,], aes(x=date,y=daysSinceError), color = "#D16103")+
+      geom_line(data = tsrain[tsrain$date > "2015-08-01"& tsrain$machineID==machine,], aes(x=date,y=daysSinceError))+
+      theme_light(),
+    ggplot()+geom_line(data = future_Q4[future_Q4$machineID==machine,], aes(x=date,y=PoF_model12))+
+      geom_bar(data = tsrain[tsrain$date > "2015-08-01" & tsrain$machineID==machine,], aes(x=date,y=as.integer(failureYN)), stat = "identity")+theme_light()+ylab("Failure / PoF"),
+    ncol = 2)
+}
+
+showFP_4machines <- function(machine1, machine2, machine3, machine4){
+  grid.arrange(
+    ggplot()+
+      geom_bar(data=tsest[tsest$machineID==machine1,],
+               aes(x=date, y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+      geom_line(data=future_Q4[future_Q4$machineID==machine1,], aes(x=date, y=PoF_model12))+
+      theme_light()+ylab("")+xlab(paste("Model",machine1)),
+    ggplot()+
+      geom_bar(data=tsest[tsest$machineID==machine2,],
+               aes(x=date, y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+      geom_line(data=future_Q4[future_Q4$machineID==machine2,], aes(x=date, y=PoF_model12))+
+      theme_light()+ylab("")+xlab(paste("Model",machine2)),
+    ggplot()+
+      geom_bar(data=tsest[tsest$machineID==machine3,],
+               aes(x=date, y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+      geom_line(data=future_Q4[future_Q4$machineID==machine3,], aes(x=date, y=PoF_model12))+
+      theme_light()+ylab("")+xlab(paste("Model",machine3)),
+    ggplot()+
+      geom_bar(data=tsest[tsest$machineID==machine4,],
+               aes(x=date, y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+      geom_line(data=future_Q4[future_Q4$machineID==machine4,], aes(x=date, y=PoF_model12))+
+      theme_light()+ylab("")+xlab(paste("Model",machine4)),
+    ncol = 2, left = "Probability of failure (PoF)"
+  )
+}
+
+
+showFCandFP("4")
+showFP_4machines("1","20","40","99")
+showFP_4machines("24","50","79","96") # the only machines on which model12 day failure (at least for bs100)
+showFCandFP("96") # it started forecasting daysSinceError into the negatives o_O
+
+plot(future_Q4$PoF_model12)
+
+view(future_Q4[future_Q4$Failure_m12==1,])
+unique(future_Q4[future_Q4$Failure_m12==1,]$machineID)
 ```
 
 
 ```{r Evaluation of failure prediction Q4}
-
+confusionMatrix(reference = as.factor(tsest$failureYN), as.factor(future_Q4$Failure_m12), positive = "1")
 ```
+
+
+
+
 
 
 ```{r Forecasts and failure prediction (2016 Q1)}
