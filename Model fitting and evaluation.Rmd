@@ -49,8 +49,7 @@ df <- df %>%
   fill(last_failure) %>%
   mutate(daysSinceError = as.numeric(floor(difftime(datetime, last_error, tz="UTC", units="days")))) %>%
   mutate(daysSinceFailure = as.numeric(floor(difftime(datetime, last_failure, tz="UTC", units="days")))) %>%
-  # logical vars for each type error/failure/comp (not necessary)
-  # daysSince vars for each type of error/failure/comp
+  # daysSince vars for each type of error/failure/comp (not used in this analysis)
   mutate(
     lastError1 = if_else(errorID == "error1", datetime, NA),
     lastError2 = if_else(errorID == "error2", datetime, NA),
@@ -168,7 +167,15 @@ df_daily <- df_daily %>%
          lag_8d_vibration = lag(vibration, n = 8),
          lag_9d_vibration = lag(vibration, n = 9),
          lag_10d_vibration = lag(vibration, n = 10)
-  )
+  ) %>%
+  
+  # days since LAST failure
+  mutate(
+    SinceFailLag = lag(daysSinceFailure, 1),
+    daysSinceLastFailure = case_when(
+      daysSinceFailure == 0 ~ SinceFailLag+1,
+      .default = daysSinceFailure)
+    )
 ```
 
 
@@ -183,41 +190,32 @@ test <- df_daily[27301:36500,]
 
 # Failure prediction
 predictors:
-- machineID (as factor)
-- date ?
-- volt + rotate + pressure + vibration
-- age + model
-- daysSinceFailure + daysSinceError
-- daysSinceError_x + daysSinceFailure_x + daysSinceReplace_x
-
-
-
-oooh daysSinceFailure is always going to be 0 when failureYN is 1
+- machineID (as factor) (not used, not hierarchical) (would also clash with using age + model)
+- volt + rotate + pressure + vibration (IoT measures)
+- age + model                           (Machine characteristics)
+- daysSinceLastFailure + daysSinceError (Maintenance information)
+- lag predictors
 
 
 
 Logistic regression models:
-*model0* = date + machineID (base for all others?)
 *model1* = IoT measures (volt + rotate + pressure + vibration)
 *model2* = IoT measures + machine characteristics (age + model)
-*model3* = IoT measures + daysSinceFailure                                                daysSinceFailure = Faulty?
-*model4* = IoT measures + daysSinceFailure + machine characteristics                      daysSinceFailure = Faulty?
-*model5* = IoT measures + daysSinceFailure + daysSinceError                               daysSinceFailure = Faulty?
-*model6* = IoT measures + daysSinceFailure + daysSinceError + machine characteristics     daysSinceFailure = Faulty?
+
+*model3* = IoT measures + daysSinceLastFailure 
+*model4* = IoT measures + daysSinceLastFailure + machine characteristics
+*model5* = IoT measures + daysSinceLastFailure + daysSinceError         
+*model6* = IoT measures + daysSinceLastFailure + daysSinceError + machine characteristics 
 *model7* = IoT measures + daysSinceError
 *model8* = IoT measures + daysSinceError + machine characteristics
 
 *model9* = IoT measures and lag predictors
 *model10* = IoT measures, machine characteristics, and lag predictors
-*model11* = IoT measures and lag predictors + daysSinceError
-*model12* = IoT measures, machine characteristics, and lag predictors + daysSinceError    (+daysSinceFailure (if LAST failure))
+*model11* = IoT measures and lag predictors + daysSinceLastFailure + daysSinceError
+*model12* = IoT measures, machine characteristics, and lag predictors + daysSinceLastFailure + daysSinceError    
 
-(if date + machineID are base for all the others, they will be model1b model2b etc.)
 
 ```{r Fitting logistic regression models}
-model0 <- glm(failureYN ~ date + machineID, 
-              family=binomial(link='logit'), 
-              data = train)
 
 model1 <- glm(failureYN ~ volt + rotate + pressure + vibration, 
               family=binomial(link='logit'), 
@@ -227,19 +225,20 @@ model2 <- glm(failureYN ~ volt + rotate + pressure + vibration + age + model,
               family=binomial(link='logit'), 
               data = train)
 
-# daysSinceFailure (which is probably a bad predictor) (unless it was days since LAST failure)
-#model3 <- glm(failureYN ~ volt + rotate + pressure + vibration + daysSinceFailure, 
-#              family=binomial(link='logit'), 
-#              data = train)
-#model4 <- glm(failureYN ~ volt + rotate + pressure + vibration + daysSinceFailure + age + model, 
-#              family=binomial(link='logit'), 
-#              data = train)
-#model5 <- glm(failureYN ~ volt + rotate + pressure + vibration + daysSinceFailure + daysSinceError, 
-#              family=binomial(link='logit'), 
-#              data = train)
-#model6 <- glm(failureYN ~ volt + rotate + pressure + vibration + daysSinceFailure + daysSinceError + age + model, 
-#              family=binomial(link='logit'), 
-#              data = train)
+
+model3 <- glm(failureYN ~ volt + rotate + pressure + vibration + daysSinceLastFailure, 
+              family=binomial(link='logit'), 
+              data = train)
+model4 <- glm(failureYN ~ volt + rotate + pressure + vibration + daysSinceLastFailure + age + model, 
+              family=binomial(link='logit'), 
+              data = train)
+model5 <- glm(failureYN ~ volt + rotate + pressure + vibration + daysSinceLastFailure + daysSinceError, 
+              family=binomial(link='logit'), 
+              data = train)
+model6 <- glm(failureYN ~ volt + rotate + pressure + vibration + daysSinceLastFailure + daysSinceError + age + model, 
+              family=binomial(link='logit'), 
+              data = train)
+
 
 model7 <- glm(failureYN ~ volt + rotate + pressure + vibration + daysSinceError, 
               family=binomial(link='logit'), 
@@ -301,8 +300,20 @@ model12 <- glm(failureYN ~ volt + rotate + pressure + vibration + age + model + 
 
 
 ```{r model summaries}
-summary(model0)
+summary(model1)
+summary(model2)
+summary(model3)
+summary(model4)
+summary(model5)
+summary(model6)
+summary(model7)
+summary(model8)
+summary(model9)
+summary(model10)
+summary(model11)
+summary(model12)
 ```
+
 
 
 
@@ -387,7 +398,7 @@ test$PoF_model9 <- predict(model9, newdata = test, type = 'response')
 test$PoF_model10 <- predict(model10, newdata = test, type = 'response')
 test$PoF_model11 <- predict(model11, newdata = test, type = 'response')
 test$PoF_model12 <- predict(model12, newdata = test, type = 'response')
-test$PoF_model0 <- predict(model0, newdata = test, type = 'response')
+#test$PoF_model0 <- predict(model0, newdata = test, type = 'response')
 
 ```
 
@@ -428,24 +439,44 @@ plotPoF_allmodels <- function(machine){
 plotPoF2 <- function(machine){
   gridExtra::grid.arrange(ggplot(test[test$machineID==machine,], aes(x=date))+
                             geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
-                            geom_line(aes(y=PoF_model0))+
-                            theme_light()+ylab("")+xlab("Model 0"),
-                          ggplot(test[test$machineID==machine,], aes(x=date))+
-                            geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
                             geom_line(aes(y=PoF_model1))+
                             theme_light()+ylab("")+xlab("Model 1"),
+                          
                           ggplot(test[test$machineID==machine,], aes(x=date))+
                             geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
                             geom_line(aes(y=PoF_model2))+
                             theme_light()+ylab("")+xlab("Model 2"),
+                          
+                          ggplot(test[test$machineID==machine,], aes(x=date))+
+                            geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model3))+
+                            theme_light()+ylab("")+xlab("Model 3"),
+                          
+                          ggplot(test[test$machineID==machine,], aes(x=date))+
+                            geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model4))+
+                            theme_light()+ylab("")+xlab("Model 4"),
+                          
+                          ggplot(test[test$machineID==machine,], aes(x=date))+
+                            geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model5))+
+                            theme_light()+ylab("")+xlab("Model 5"),
+                          
+                          ggplot(test[test$machineID==machine,], aes(x=date))+
+                            geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model6))+
+                            theme_light()+ylab("")+xlab("Model 6"),
+                          
                           ggplot(test[test$machineID==machine,], aes(x=date))+
                             geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
                             geom_line(aes(y=PoF_model7))+
                             theme_light()+ylab("")+xlab("Model 7"),
+                          
                           ggplot(test[test$machineID==machine,], aes(x=date))+
                             geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
                             geom_line(aes(y=PoF_model8))+
                             theme_light()+ylab("")+xlab("Model 8"),
+                          
                           ggplot(test[test$machineID==machine,], aes(x=date))+
                             geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
                             geom_line(aes(y=PoF_model9))+
@@ -454,20 +485,25 @@ plotPoF2 <- function(machine){
                             geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
                             geom_line(aes(y=PoF_model10))+
                             theme_light()+ylab("")+xlab("Model 10"),
+                          
                           ggplot(test[test$machineID==machine,], aes(x=date))+
                             geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
                             geom_line(aes(y=PoF_model11))+
                             theme_light()+ylab("")+xlab("Model 11"),
+                          
                           ggplot(test[test$machineID==machine,], aes(x=date))+
                             geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
                             geom_line(aes(y=PoF_model12))+
                             theme_light()+ylab("")+xlab("Model 12"),
+                          
                           #ggplot(test[test$machineID==machine,], aes(x=date))+
                           #  geom_bar(aes(y=failureYN), stat = "identity")+
                           #  theme_light()+ylab("")+xlab("Actual failure"),
                           ncol = 3, left = "Probability of failure (PoF)"
   )
 }
+
+
 
 plot_IoT_PoF <- function(machine, title){
  gridExtra::grid.arrange(
@@ -482,11 +518,62 @@ plot_IoT_PoF <- function(machine, title){
 }
 
 
-plotPoF(21)
-plotPoF_allmodels(21)
-plotPoF2(99)
-plot_IoT_PoF(21, "PoF machine 21")
+#plotPoF(21)
+#plotPoF_allmodels(21)
+plotPoF2(1)
+#plot_IoT_PoF(21, "PoF machine 21")
 ```
+
+```{r plot examples of predictions for model 12 (out-of-sample)}
+gridExtra::grid.arrange(ggplot(test[test$machineID==1,], aes(x=date))+
+                            geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model12))+
+                            theme_light()+ylab("")+xlab("Machine 1"),
+                        
+                        ggplot(test[test$machineID==2,], aes(x=date))+
+                            geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model12))+
+                            theme_light()+ylab("")+xlab("Machine 2"),
+                        
+                        ggplot(test[test$machineID==3,], aes(x=date))+
+                            geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model12))+
+                            theme_light()+ylab("")+xlab("Machine 3"),
+                        
+                        ggplot(test[test$machineID==4,], aes(x=date))+
+                            geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model12))+
+                            theme_light()+ylab("")+xlab("Machine 4"),
+                        
+                        ggplot(test[test$machineID==5,], aes(x=date))+
+                            geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model12))+
+                            theme_light()+ylab("")+xlab("Machine 5"),
+                        
+                        ggplot(test[test$machineID==6,], aes(x=date))+
+                            geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model12))+
+                            theme_light()+ylab("")+xlab("Machine 6"),
+                        
+                        ggplot(test[test$machineID==7,], aes(x=date))+
+                            geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model12))+
+                            theme_light()+ylab("")+xlab("Machine 7"),
+                        
+                        ggplot(test[test$machineID==8,], aes(x=date))+
+                            geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model12))+
+                            theme_light()+ylab("")+xlab("Machine 8"),
+                        
+                        ggplot(test[test$machineID==9,], aes(x=date))+
+                            geom_bar(aes(y=failureYN), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model12))+
+                            theme_light()+ylab("")+xlab("Machine 9"),
+                          
+                          ncol = 3, left = "Probability of failure (PoF)"
+                        )
+```
+
 
 
 ```{r Confusion matrices}
@@ -498,26 +585,34 @@ test <- test %>%
   mutate(
     Failure_m1 = ifelse(PoF_model1 < decision_boundary, 0, 1),
     Failure_m2 = ifelse(PoF_model2 < decision_boundary, 0, 1),
+    Failure_m3 = ifelse(PoF_model3 < decision_boundary, 0, 1),
+    Failure_m4 = ifelse(PoF_model4 < decision_boundary, 0, 1),
+    Failure_m5 = ifelse(PoF_model5 < decision_boundary, 0, 1),
+    Failure_m6 = ifelse(PoF_model6 < decision_boundary, 0, 1),
     Failure_m7 = ifelse(PoF_model7 < decision_boundary, 0, 1),
     Failure_m8 = ifelse(PoF_model8 < decision_boundary, 0, 1),
     Failure_m9 = ifelse(PoF_model9 < decision_boundary, 0, 1),
     Failure_m10 = ifelse(PoF_model10 < decision_boundary, 0, 1),
     Failure_m11 = ifelse(PoF_model11 < decision_boundary, 0, 1),
-    Failure_m12 = ifelse(PoF_model12 < decision_boundary, 0, 1),
-    Failure_m0 = ifelse(PoF_model0 < decision_boundary, 0, 1),
+    Failure_m12 = ifelse(PoF_model12 < decision_boundary, 0, 1)
+    #Failure_m0 = ifelse(PoF_model0 < decision_boundary, 0, 1),
   )
 
 ConfMat1 <- confusionMatrix(reference = as.factor(test$failureYN), as.factor(test$Failure_m1), positive = "1") #err
 ConfMat2 <- confusionMatrix(reference = as.factor(test$failureYN), as.factor(test$Failure_m2), positive = "1") #err
+ConfMat3 <- confusionMatrix(reference = as.factor(test$failureYN), as.factor(test$Failure_m3), positive = "1")
+ConfMat4 <- confusionMatrix(reference = as.factor(test$failureYN), as.factor(test$Failure_m4), positive = "1")
+ConfMat5 <- confusionMatrix(reference = as.factor(test$failureYN), as.factor(test$Failure_m5), positive = "1")
+ConfMat6 <- confusionMatrix(reference = as.factor(test$failureYN), as.factor(test$Failure_m6), positive = "1")
 ConfMat7 <- confusionMatrix(reference = as.factor(test$failureYN), as.factor(test$Failure_m7), positive = "1")
 ConfMat8 <- confusionMatrix(reference = as.factor(test$failureYN), as.factor(test$Failure_m8), positive = "1")
 ConfMat9 <- confusionMatrix(reference = as.factor(test$failureYN), as.factor(test$Failure_m9), positive = "1")
 ConfMat10 <- confusionMatrix(reference = as.factor(test$failureYN), as.factor(test$Failure_m10), positive = "1")
 ConfMat11 <- confusionMatrix(reference = as.factor(test$failureYN), as.factor(test$Failure_m11), positive = "1")
 ConfMat12 <- confusionMatrix(reference = as.factor(test$failureYN), as.factor(test$Failure_m12), positive = "1")
-ConfMat0 <- confusionMatrix(reference = as.factor(test$failureYN), as.factor(test$Failure_m0), positive = "1") #err
+#ConfMat0 <- confusionMatrix(reference = as.factor(test$failureYN), as.factor(test$Failure_m0), positive = "1") #err
 
-ConfMat12
+ConfMat1
 ```
 
 
@@ -581,20 +676,29 @@ fc_daysSinceError <- forecast(fit_daysSinceError, new_data = future_Q4[,1:2])
 ```{r Test forecast accuracy of the different models}
 # Point forecast accuracy: How much error?
 # The average of each score across machines
-accuracy(fit_volt) %>% select(.model, machineID, RMSE, MAPE) %>%
+
+# OUT OF SAMPLE:
+fc_volt %>%
+  accuracy(rbind(tsrain, tsest)) %>% select(.model, machineID, RMSE, MAPE) %>%
   aggregate(cbind(RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
 
-accuracy(fit_rotate) %>% select(.model, machineID, RMSE, MAPE) %>%
+fc_rotate %>% 
+  accuracy(rbind(tsrain, tsest)) %>% select(.model, machineID, RMSE, MAPE) %>%
   aggregate(cbind(RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
 
-accuracy(fit_pressure) %>% select(.model, machineID, RMSE, MAPE) %>%
+fc_pressure %>%
+  accuracy(rbind(tsrain, tsest)) %>% select(.model, machineID, RMSE, MAPE) %>%
   aggregate(cbind(RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
 
-accuracy(fit_vibration) %>% select(.model, machineID, RMSE, MAPE) %>%
+fc_vibration %>%
+  accuracy(rbind(tsrain, tsest)) %>% select(.model, machineID, RMSE, MAPE) %>%
   aggregate(cbind(RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
 
-accuracy(fit_daysSinceError) %>% select(.model, machineID, RMSE, MAPE) %>%
+fc_daysSinceError %>%
+  accuracy(rbind(tsrain, tsest)) %>% select(.model, machineID, RMSE, MAPE) %>%
   aggregate(cbind(RMSE, MAPE) ~ .model, FUN = "mean", drop = FALSE)
+
+
 
 
 # Distributional forecast accuracy: Continuous ranked probability score (CRPS)
@@ -757,25 +861,131 @@ fc_daysSinceError_bs100 %>%
 # FPP3 5.4
 
 
+theme_set(theme_light())
+
+# define function to show residuals plots for given machineID
+PlotResids <- function(machineNr){
+  name <- paste("Machine", as.character(machineNr))
+  print(gg_tsresiduals(fit_volt[fit_volt$machineID == machineNr,])+labs(title = "Volt", subtitle = name))
+  print(gg_tsresiduals(fit_rotate[fit_rotate$machineID == machineNr,])+labs(title = "Rotate", subtitle = name))
+  print(gg_tsresiduals(fit_pressure[fit_pressure$machineID == machineNr,])+labs(title = "Pressure", subtitle = name))
+  print(gg_tsresiduals(fit_vibration[fit_vibration$machineID == machineNr,])+labs(title = "Vibration", subtitle = name))
+  print(gg_tsresiduals(fit_daysSinceError[fit_daysSinceError$machineID == machineNr,])+labs(title = "Days Since Error", subtitle = name))
+}
+
+# plot residuals for a specific machineID
+PlotResids(5)
 
 # Normality of residuals
-gg_tsresiduals(fit_volt[fit_volt$machineID == 1,])
-gg_tsresiduals(fit_rotate[fit_rotate$machineID == 1,])
-gg_tsresiduals(fit_pressure[fit_pressure$machineID == 1,])
-gg_tsresiduals(fit_vibration[fit_vibration$machineID == 1,])
-gg_tsresiduals(fit_daysSinceError[fit_daysSinceError$machineID == 1,])
-
-gg_tsresiduals(fit_volt[fit_volt$machineID == 1,])
-gg_tsresiduals(fit_rotate[fit_rotate$machineID == 1,])
-gg_tsresiduals(fit_pressure[fit_pressure$machineID == 1,])
-gg_tsresiduals(fit_vibration[fit_vibration$machineID == 1,])
-gg_tsresiduals(fit_daysSinceError[fit_daysSinceError$machineID == 1,])
+#gg_tsresiduals(fit_volt[fit_volt$machineID == 1,])+labs(title = "Volt", subtitle = "Machine 1")
+#gg_tsresiduals(fit_rotate[fit_rotate$machineID == 1,])+labs(title = "Rotate", subtitle = "Machine 1")
+#gg_tsresiduals(fit_pressure[fit_pressure$machineID == 1,])+labs(title = "Pressure", subtitle = "Machine 1")
+#gg_tsresiduals(fit_vibration[fit_vibration$machineID == 1,])+labs(title = "Vibration", subtitle = "Machine 1")
+#gg_tsresiduals(fit_daysSinceError[fit_daysSinceError$machineID == 1,])+labs(title = "Days Since Error", subtitle = "Machine 1")
 # the residuals are not homoschedastic :(
 
-# portmanteau tests - do the residuals come from white noise?
+# portmanteau test for autocorrelation - do the residuals come from white noise?
 augment(fit_volt)%>%
   features(.innov, ljung_box, lag = 7)
 # lb_pvalues are very small (on most machines), so it seems very, very unlikely that this is just white noise
+```
+
+```{r Residual plots extra}
+
+fit_volt[[2]][[1]]$fit$residuals # machine 1
+plot(type = "l", x = fit_volt[[2]][[1]]$data$date, y = fit_volt[[2]][[1]]$fit$residuals)
+plot(type = "h", x = fit_volt[[2]][[1]]$fit$residuals)
+hist(fit_volt[[2]][[1]]$fit$residuals, breaks = 23)
+# technically, you could get the average residuals (that would be misleading though?) instead just one long list of residuals for each predictor variable. 
+
+# what is the average residual? (ideally 0) (and ideally with no trend over time)
+mean(fit_volt[[2]][[1]]$fit$residuals)
+
+ggplot(data = NULL, aes(x = fit_volt[[2]][[1]]$data$date, y = fit_volt[[2]][[1]]$fit$residuals))+
+  geom_point()+
+  geom_smooth()
+
+
+
+
+# Add together all machines (for each forecast variable)
+machineID <-  c()
+volt_dates100 <- c()
+volt_resids100 <- c()
+rotate_resids100 <- c()
+pressure_resids100 <- c()
+vibration_resids100 <- c()
+daysSinceError_resids100 <- c()
+
+# loop through every machineID and gather residuals data
+for(i in 1:100) {
+  machineID <-  c(machineID, i)
+  volt_dates100 <- c(volt_dates100, as.character(fit_volt[[2]][[i]]$data$date))
+  volt_resids100 <- c(volt_resids100, fit_volt[[2]][[i]]$fit$residuals)
+  rotate_resids100 <- c(rotate_resids100, fit_rotate[[2]][[i]]$fit$residuals)
+  pressure_resids100 <- c(pressure_resids100, fit_pressure[[2]][[i]]$fit$residuals)
+  vibration_resids100 <- c(vibration_resids100, fit_vibration[[2]][[i]]$fit$residuals)
+  daysSinceError_resids100 <- c(daysSinceError_resids100, fit_daysSinceError[[2]][[i]]$fit$residuals)
+}
+
+# save as data frame
+residuals_df <- data.frame(machineID, as.Date(volt_dates100), 
+                             volt_resids100, rotate_resids100, pressure_resids100, 
+                             vibration_resids100, daysSinceError_resids100)
+
+# plot residuals for all machines aggregated
+ggplot(data = residuals_df, aes(x = as.Date.volt_dates100., y = volt_resids100))+
+  geom_point(alpha = 0.1)+
+  geom_smooth()+
+  labs(title = "Volt residuals (all 100 machines)", x = "Date", y = "Residuals")
+
+ggplot(data = residuals_df, aes(x = as.Date.volt_dates100., y = rotate_resids100))+
+  geom_point(alpha = 0.1)+
+  geom_smooth()+
+  labs(title = "Rotate residuals (all 100 machines)", x = "Date", y = "Residuals")
+
+ggplot(data = residuals_df, aes(x = as.Date.volt_dates100., y = pressure_resids100))+
+  geom_point(alpha = 0.1)+
+  geom_smooth()+
+  labs(title = "Pressure residuals (all 100 machines)", x = "Date", y = "Residuals")
+
+ggplot(data = residuals_df, aes(x = as.Date.volt_dates100., y = vibration_resids100))+
+  geom_point(alpha = 0.1)+
+  geom_smooth()+
+  labs(title = "Vibration residuals (all 100 machines)", x = "Date", y = "Residuals")
+
+ggplot(data = residuals_df, aes(x = as.Date.volt_dates100., y = daysSinceError_resids100))+
+  geom_point(alpha = 0.1)+
+  geom_smooth()+
+  labs(title = "Days since Error residuals (all 100 machines)", x = "Date", y = "Residuals")
+```
+
+
+
+```{r ACF}
+# make a tsibble
+residuals_tsibble <- as_tsibble(residuals_df, key = machineID, index = as.Date.volt_dates100.)
+
+ACF(residuals_tsibble, y = volt_resids100)[1:24,2:3] %>% autoplot(.vars = acf)
+acf(residuals_tsibble$volt_resids100, plot = TRUE, lag.max = 24)
+
+acf_volt <- ACF(residuals_tsibble, y = volt_resids100)
+acf_volt_2 <- acf(acf_volt$acf, lag.max = 24)
+plot(acf_volt_2[1:24])
+
+acf_rotate <- acf(ACF(residuals_tsibble, y = rotate_resids100)$acf, lag.max = 24)
+acf_pressure <- acf(ACF(residuals_tsibble, y = pressure_resids100)$acf, lag.max = 24)
+acf_vibration <- acf(ACF(residuals_tsibble, y = vibration_resids100)$acf, lag.max = 24)
+acf_dayssince <- acf(ACF(residuals_tsibble, y = daysSinceError_resids100)$acf, lag.max = 24)
+
+plot(acf_volt_2[1:24], main = "Volt Autocorrelation Function (all machines)")
+plot(acf_rotate[1:24], main = "Rotate Autocorrelation Function (all machines)")
+plot(acf_pressure[1:24], main = "Pressure Autocorrelation Function (all machines)")
+plot(acf_vibration[1:24], main = "Vibration Autocorrelation Function (all machines)")
+plot(acf_dayssince[1:24], main = "Days Since Error Autocorrelation Function (all machines)")
+
+
+# something must be wrong if daysSinceError doesn't have high autocorrelation. - At least in the first lags....
 ```
 
 
@@ -925,6 +1135,81 @@ unique(future_Q4[future_Q4$Failure_m12==1,]$machineID)
 ```
 
 
+```{r PUT REAL failureYN in future_Q4}
+future_Q4$failureYN_observed <- tsest$failureYN
+```
+
+
+
+```{r plot examples of predictions for model 12 (on forecasts)}
+gridExtra::grid.arrange(ggplot(future_Q4[future_Q4$machineID==1,], aes(x=date))+
+                            geom_bar(aes(y=failureYN_observed), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model12))+ ylim(0,1)+
+                            theme_light()+ylab("")+xlab("Machine 1"),
+                        
+                        ggplot(future_Q4[future_Q4$machineID==2,], aes(x=date))+
+                            geom_bar(aes(y=failureYN_observed), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model12))+ ylim(0,1)+
+                            theme_light()+ylab("")+xlab("Machine 2"),
+                        
+                        ggplot(future_Q4[future_Q4$machineID==3,], aes(x=date))+
+                            geom_bar(aes(y=failureYN_observed), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model12))+ ylim(0,1)+
+                            theme_light()+ylab("")+xlab("Machine 3"),
+                        
+                        ggplot(future_Q4[future_Q4$machineID==4,], aes(x=date))+
+                            geom_bar(aes(y=failureYN_observed), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model12))+ ylim(0,1)+
+                            theme_light()+ylab("")+xlab("Machine 4"),
+                        
+                        ggplot(future_Q4[future_Q4$machineID==5,], aes(x=date))+
+                            geom_bar(aes(y=failureYN_observed), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model12))+ ylim(0,1)+
+                            theme_light()+ylab("")+xlab("Machine 5"),
+                        
+                        ggplot(future_Q4[future_Q4$machineID==6,], aes(x=date))+
+                            geom_bar(aes(y=failureYN_observed), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model12))+ ylim(0,1)+
+                            theme_light()+ylab("")+xlab("Machine 6"),
+                        
+                        ggplot(future_Q4[future_Q4$machineID==7,], aes(x=date))+
+                            geom_bar(aes(y=failureYN_observed), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model12))+ ylim(0,1)+
+                            theme_light()+ylab("")+xlab("Machine 7"),
+                        
+                        ggplot(future_Q4[future_Q4$machineID==8,], aes(x=date))+
+                            geom_bar(aes(y=failureYN_observed), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model12))+ ylim(0,1)+
+                            theme_light()+ylab("")+xlab("Machine 8"),
+                        
+                        ggplot(future_Q4[future_Q4$machineID==9,], aes(x=date))+
+                            geom_bar(aes(y=failureYN_observed), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+                            geom_line(aes(y=PoF_model12))+ ylim(0,1)+
+                            theme_light()+ylab("")+xlab("Machine 9"),
+                          
+                          ncol = 3, left = "Probability of failure (PoF)"
+                        )
+
+
+gridExtra::grid.arrange(
+  ggplot(future_Q4[future_Q4$machineID==24,], aes(x=date))+
+    geom_bar(aes(y=failureYN_observed), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+    geom_line(aes(y=PoF_model12))+ ylim(0,1)+
+    theme_light()+ylab("")+xlab("Machine 24"),
+  
+  ggplot(future_Q4[future_Q4$machineID==96,], aes(x=date))+
+    geom_bar(aes(y=failureYN_observed), stat = "identity", alpha = 0.5, fill = "#009DA6")+
+    geom_line(aes(y=PoF_model12))+ ylim(0,1)+
+    theme_light()+ylab("")+xlab("Machine 96"),
+  
+  ncol = 3, nrow = 3, left = "Probability of failure (PoF)"
+  )
+
+mean(future_Q4$PoF_model12)
+```
+
+
+
 ```{r Evaluation of failure prediction Q4}
 confusionMatrix(reference = as.factor(tsest$failureYN), as.factor(future_Q4$Failure_m12), positive = "1")
 ```
@@ -1036,5 +1321,42 @@ components(fit_volt_STL)
 
 
 
+```{r Trying to make days since LAST Failure}
+# should just be days since failure where the 0s are removed and put as one more than the previous row
+test_df_daily <- df_daily
+
+# replace 0 days with NA
+#test_df_daily$daysSinceFailure[test_df_daily$daysSinceFailure == 0] <- NA
+
+# fill in so the day of failure has the same number as the day before
+#test_df_daily <- test_df_daily %>%
+#  group_by(machineID) %>%
+#  fill(daysSinceFailure)
+
+# make lag column so rows where the number is the same as before can 
+
+# no wait, days where daysSinceFailure == NA make it lagged
+#test_df_daily <- test_df_daily %>%
+#  group_by(machineID) %>%
+#  mutate(daysSinceLastFailure = case_when(
+#    daysSinceFailure == NA ~ (lag(daysSinceFailure, 1)+1),
+#    daysSinceFailure != NA ~ daysSinceFailure
+#  ))
+
+
+
+#
+test_df_daily <- test_df_daily %>%
+  group_by(machineID) %>%
+  mutate(
+    SinceFailLag = lag(daysSinceFailure, 1),
+    daysSinceLastFailure = case_when(
+      daysSinceFailure == 0 ~ SinceFailLag+1,
+      .default = daysSinceFailure)
+    )
+
+
+view(select(test_df_daily, c("machineID", "date", "failureYN", "daysSinceFailure", "SinceFailLag", "daysSinceLastFailure")))
+```
 
 
